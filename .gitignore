@@ -1,17 +1,16 @@
-# Secrets
 .streamlit/secrets.toml
-
-
-# Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 *.egg-info/
+dist/
+build/
+.DS_Store
+*.zip
+Data.docx
+extracted_data.txt
+chunks.json
+extract_text_from_word.py
+chunk_data.py
+create_vector_db.py
 
-# IDE
-.vscode/
-.idea/
-
-# Data files (optional - keep these if you want to share)
-# chroma_db/
-# chunks.json
-# extracted_data.txt
