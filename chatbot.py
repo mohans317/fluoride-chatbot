@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import requests
 from sentence_transformers import SentenceTransformer
@@ -8,19 +9,20 @@ st.set_page_config(page_title="Fluoride Chatbot", page_icon="💧", layout="wide
 st.markdown("<h1 style='text-align: center; color: #1f77b4;'>💧 Fluoride Chatbot</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #666;'>Answers based on your provided fluoride data</p>", unsafe_allow_html=True)
 
-# Get API key
+# Get API key from secrets (local) or environment variable (Render)
 try:
     api_key = st.secrets["PERPLEXITY_API_KEY"]
     api_key_loaded = True
-except KeyError:
-    api_key_loaded = False
+except (KeyError, FileNotFoundError):
+    api_key = os.environ.get("PERPLEXITY_API_KEY")
+    api_key_loaded = bool(api_key)
 
 # Initialize embeddings and ChromaDB
 @st.cache_resource
 def load_chroma():
     embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     client = chromadb.PersistentClient(path="./chroma_db")
-    collection = client.get_collection(name="langchain")  # CORRECT collection name
+    collection = client.get_collection(name="langchain")
     return embeddings, collection
 
 try:
@@ -35,9 +37,9 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     
     if api_key_loaded:
-        st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ API Key loaded from Secrets</div>', unsafe_allow_html=True)
+        st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ API Key loaded</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ API Key not found</div>', unsafe_allow_html=True)
+        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ API Key not found - Add PERPLEXITY_API_KEY to environment</div>', unsafe_allow_html=True)
     
     if chroma_loaded:
         st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ Knowledge base loaded (1,529 documents)</div>', unsafe_allow_html=True)
@@ -60,7 +62,7 @@ with st.sidebar:
     """)
 
 if not api_key_loaded or not chroma_loaded:
-    st.error("⚠️ Please check configuration in sidebar!")
+    st.error("⚠️ Please configure environment variables!")
     st.stop()
 
 # Chat interface
@@ -90,7 +92,7 @@ if prompt := st.chat_input("Ask about fluoride in drinking water..."):
     with st.chat_message("assistant"):
         with st.spinner("🔍 Searching your fluoride data..."):
             try:
-                # Step 1: Search ChromaDB for relevant documents
+                # Step 1: Search ChromaDB
                 query_embedding = embeddings.encode([prompt])[0].tolist()
                 results = collection.query(
                     query_embeddings=[query_embedding],
@@ -108,10 +110,10 @@ if prompt := st.chat_input("Ask about fluoride in drinking water..."):
                         "content": answer
                     })
                 else:
-                    # Step 2: Format context from YOUR documents
+                    # Step 2: Format context
                     context = "\n\n---\n\n".join(retrieved_docs)
                     
-                    # Step 3: Send to Perplexity with instruction to use ONLY this data
+                    # Step 3: Call Perplexity API
                     url = "https://api.perplexity.ai/chat/completions"
                     
                     headers = {
@@ -164,10 +166,11 @@ DATA FROM KNOWLEDGE BASE:
                                 st.markdown(f"**Source {i}:**")
                                 st.text(source[:300] + "..." if len(source) > 300 else source)
                     else:
-                        error_response = response.json() if response.headers.get('content-type') == 'application/json' else response.text
-                        st.error(f"❌ Error {response.status_code}")
+                        error_msg = f"API Error {response.status_code}"
+                        st.error(f"❌ {error_msg}")
                         
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
+
 
 
