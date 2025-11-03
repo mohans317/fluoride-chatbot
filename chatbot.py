@@ -1,4 +1,5 @@
 import os
+import sys
 import streamlit as st
 import requests
 from sentence_transformers import SentenceTransformer
@@ -9,40 +10,60 @@ st.set_page_config(page_title="Fluoride Chatbot", page_icon="💧", layout="wide
 st.markdown("<h1 style='text-align: center; color: #1f77b4;'>💧 Fluoride Chatbot</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #666;'>Answers based on your provided fluoride data</p>", unsafe_allow_html=True)
 
-# Get API key from secrets (local) or environment variable (Render)
-try:
-    api_key = st.secrets["PERPLEXITY_API_KEY"]
-    api_key_loaded = True
-except (KeyError, FileNotFoundError):
-    api_key = os.environ.get("PERPLEXITY_API_KEY")
-    api_key_loaded = bool(api_key)
+# Get API key from environment
+api_key = os.environ.get("PERPLEXITY_API_KEY")
 
-# Initialize embeddings and ChromaDB
+if not api_key:
+    st.error("❌ ERROR: PERPLEXITY_API_KEY environment variable is not set!")
+    st.info("Please add PERPLEXITY_API_KEY to your Render environment variables in Settings")
+    st.stop()
+
+# Initialize embeddings and ChromaDB with better error handling
 @st.cache_resource
 def load_chroma():
-    embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    client = chromadb.PersistentClient(path="./chroma_db")
-    collection = client.get_collection(name="langchain")
-    return embeddings, collection
+    try:
+        # Try to load with absolute path for Render
+        db_path = os.path.abspath("./chroma_db")
+        
+        if not os.path.exists(db_path):
+            st.warning(f"⚠️ Database path not found: {db_path}")
+            return None, None
+        
+        embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        client = chromadb.PersistentClient(path=db_path)
+        
+        try:
+            collection = client.get_collection(name="langchain")
+        except:
+            # Try alternative collection names
+            collections = client.list_collections()
+            if collections:
+                collection = client.get_collection(name=collections[0].name)
+            else:
+                return embeddings, None
+        
+        return embeddings, collection
+    except Exception as e:
+        st.error(f"❌ Error loading ChromaDB: {str(e)}")
+        return None, None
 
-try:
-    embeddings, collection = load_chroma()
-    chroma_loaded = True
-except Exception as e:
-    st.error(f"❌ Error loading ChromaDB: {str(e)}")
-    chroma_loaded = False
+embeddings, collection = load_chroma()
 
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    if api_key_loaded:
+    if api_key:
         st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ API Key loaded</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ API Key not found - Add PERPLEXITY_API_KEY to environment</div>', unsafe_allow_html=True)
+        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ API Key not configured</div>', unsafe_allow_html=True)
     
-    if chroma_loaded:
-        st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ Knowledge base loaded (1,529 documents)</div>', unsafe_allow_html=True)
+    if collection:
+        try:
+            count = collection.count()
+            st.markdown(f'<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ Knowledge base loaded ({count} documents)</div>', unsafe_allow_html=True)
+        except:
+            st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ Knowledge base error</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ Knowledge base not found</div>', unsafe_allow_html=True)
     
@@ -54,15 +75,14 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("""
     ### 📚 About This Chatbot
-    - ✅ Uses YOUR fluoride data (1,529 documents)
+    - ✅ Uses YOUR fluoride data
     - ✅ Shows sources for each answer
     - ✅ Simple language for everyone
-    - ✅ Secure API key handling
     - ✅ Powered by Perplexity Sonar AI
     """)
 
-if not api_key_loaded or not chroma_loaded:
-    st.error("⚠️ Please configure environment variables!")
+if not embeddings or not collection:
+    st.error("⚠️ Knowledge base not available. Please check ChromaDB files are in the repository.")
     st.stop()
 
 # Chat interface
@@ -129,12 +149,11 @@ if prompt := st.chat_input("Ask about fluoride in drinking water..."):
                                 "content": """You are a helpful assistant answering questions about fluoride in drinking water.
 
 IMPORTANT RULES:
-1. Answer ONLY using the provided data below - do NOT use external knowledge
-2. If the answer is NOT in the data, say: "I don't have this information in my knowledge base"
-3. Use simple, easy-to-understand language for everyone
-4. Avoid technical jargon - explain in simple terms
-5. If you use technical terms, explain what they mean
-6. Always be accurate and factual
+1. Answer ONLY using the provided data
+2. If the answer is NOT in the data, say: "I don't have this information"
+3. Use simple, easy-to-understand language
+4. Avoid technical jargon
+5. Be accurate and factual
 
 DATA FROM KNOWLEDGE BASE:
 {}""".format(context)
@@ -144,7 +163,7 @@ DATA FROM KNOWLEDGE BASE:
                                 "content": prompt
                             }
                         ],
-                        "max_tokens": 2048,
+                        "max_tokens": 1024,
                         "temperature": 0.2
                     }
                     
@@ -160,17 +179,16 @@ DATA FROM KNOWLEDGE BASE:
                             "sources": retrieved_docs
                         })
                         
-                        # Show sources
                         with st.expander("📚 Sources Used"):
                             for i, source in enumerate(retrieved_docs, 1):
                                 st.markdown(f"**Source {i}:**")
                                 st.text(source[:300] + "..." if len(source) > 300 else source)
                     else:
-                        error_msg = f"API Error {response.status_code}"
-                        st.error(f"❌ {error_msg}")
+                        st.error(f"❌ API Error {response.status_code}: {response.text}")
                         
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
+
 
 
 
