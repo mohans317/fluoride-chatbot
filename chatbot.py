@@ -1,193 +1,122 @@
 import os
-import sys
 import streamlit as st
-import requests
-from sentence_transformers import SentenceTransformer
-import chromadb
+
+# ------ Robust Utility Functions ------
+
+def safe_get_env(name, secret_fallback=None, error_if_missing=True):
+    # Prefer environment, fallback to secrets (for local Streamlit Cloud), else throw error or return None
+    val = os.environ.get(name)
+    if val: return val
+    try:
+        import streamlit as _st
+        if hasattr(_st, "secrets"):
+            val = _st.secrets.get(name)
+    except Exception:
+        pass
+    if (not val) and error_if_missing:
+        st.error(f"❌ Missing critical configuration: '{name}'. Please set it in cloud dashboard Environment (or .streamlit/secrets.toml for local debug)")
+        st.stop()
+    return val or secret_fallback
+
+# ------ Application Setup ------
 
 st.set_page_config(page_title="Fluoride Chatbot", page_icon="💧", layout="wide")
+st.title("💧 Fluoride Chatbot")
+st.write("Answers based on your provided fluoride data. Robust, cloud-first template.")
 
-st.markdown("<h1 style='text-align: center; color: #1f77b4;'>💧 Fluoride Chatbot</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #666;'>Answers based on your provided fluoride data</p>", unsafe_allow_html=True)
+# API Key load
+API_KEY = safe_get_env("PERPLEXITY_API_KEY")
 
-# Get API key from environment
-api_key = os.environ.get("PERPLEXITY_API_KEY")
-
-if not api_key:
-    st.error("❌ ERROR: PERPLEXITY_API_KEY environment variable is not set!")
-    st.info("Please add PERPLEXITY_API_KEY to your Render environment variables in Settings")
-    st.stop()
-
-# Initialize embeddings and ChromaDB with better error handling
-@st.cache_resource
-def load_chroma():
+# ChromaDB Setup (Cloud Safe):
+def load_chroma_db(db_dir="./chroma_db"):
+    db_path = os.path.abspath(db_dir)
+    if not os.path.exists(db_path):
+        st.warning(f"Chroma DB directory not found: {db_path}\nIf deploying to cloud, upload your chroma_db/ to your repo or switch to a managed cloud vector db.")
+        return None, None
     try:
-        # Try to load with absolute path for Render
-        db_path = os.path.abspath("./chroma_db")
-        
-        if not os.path.exists(db_path):
-            st.warning(f"⚠️ Database path not found: {db_path}")
-            return None, None
-        
+        from sentence_transformers import SentenceTransformer
+        import chromadb
         embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         client = chromadb.PersistentClient(path=db_path)
-        
-        try:
-            collection = client.get_collection(name="langchain")
-        except:
-            # Try alternative collection names
-            collections = client.list_collections()
-            if collections:
-                collection = client.get_collection(name=collections[0].name)
-            else:
-                return embeddings, None
-        
+        colnames = [c.name for c in client.list_collections()]
+        collection = client.get_collection(name=colnames[0]) if colnames else None
+        if not collection:
+            st.warning("No collection found in chroma_db.")
         return embeddings, collection
     except Exception as e:
-        st.error(f"❌ Error loading ChromaDB: {str(e)}")
+        st.error(f"Failed to initialize vector DB: {str(e)}")
         return None, None
 
-embeddings, collection = load_chroma()
+embeddings, collection = load_chroma_db()
 
-# Sidebar
+# ------ Sidebar Diagnostics ------
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    if api_key:
-        st.markdown('<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ API Key loaded</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ API Key not configured</div>', unsafe_allow_html=True)
-    
+    st.header("Diagnostics")
+    st.markdown("**API Key:** " + ("✅ Found" if API_KEY else "❌ Missing"))
+    st.markdown("**DB:** " + ("✅ Loaded" if collection else "❌ Not Found"))
     if collection:
         try:
             count = collection.count()
-            st.markdown(f'<div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;">✅ Knowledge base loaded ({count} documents)</div>', unsafe_allow_html=True)
-        except:
-            st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ Knowledge base error</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">❌ Knowledge base not found</div>', unsafe_allow_html=True)
-    
-    model_name = st.selectbox(
-        "🤖 Select Model",
-        ["sonar", "sonar-reasoning", "sonar-pro"]
-    )
-    
-    st.markdown("---")
-    st.markdown("""
-    ### 📚 About This Chatbot
-    - ✅ Uses YOUR fluoride data
-    - ✅ Shows sources for each answer
-    - ✅ Simple language for everyone
-    - ✅ Powered by Perplexity Sonar AI
-    """)
+            st.markdown(f"**Docs in DB:** {count}")
+        except: st.markdown("**Docs in DB:** ❌ Error")
 
-if not embeddings or not collection:
-    st.error("⚠️ Knowledge base not available. Please check ChromaDB files are in the repository.")
+# ------ Main Chat Loop ------
+
+if not API_KEY or not collection:
+    st.info("Please check setup before asking questions.")
     st.stop()
 
-# Chat interface
-st.header("Chat")
-
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state["messages"] = []
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "sources" in message and message["sources"]:
-            with st.expander("📚 Sources Used"):
-                for i, source in enumerate(message["sources"], 1):
-                    st.markdown(f"**Source {i}:**")
-                    st.text(source[:300] + "..." if len(source) > 300 else source)
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# Chat input
-if prompt := st.chat_input("Ask about fluoride in drinking water..."):
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
+prompt = st.chat_input("Ask about fluoride in drinking water...")
+
+if prompt:
+    st.session_state["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching your fluoride data..."):
+        with st.spinner("Retrieving..."):
             try:
-                # Step 1: Search ChromaDB
-                query_embedding = embeddings.encode([prompt])[0].tolist()
-                results = collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=3,
-                    include=['documents']
-                )
-                
-                retrieved_docs = results['documents'][0] if results['documents'] else []
-                
-                if not retrieved_docs:
-                    answer = "⚠️ Sorry, I couldn't find relevant information about your question in the knowledge base."
+                # --- Embeddings & Search ---
+                query_vector = embeddings.encode([prompt])[0].tolist()
+                res = collection.query(query_embeddings=[query_vector], n_results=3, include=['documents'])
+                docs = res['documents'][0] if (res and res.get("documents")) else []
+                if not docs:
+                    answer = "❗I couldn't find relevant info in your knowledge base."
                     st.markdown(answer)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
+                    st.session_state["messages"].append({"role": "assistant", "content": answer})
                 else:
-                    # Step 2: Format context
-                    context = "\n\n---\n\n".join(retrieved_docs)
-                    
-                    # Step 3: Call Perplexity API
-                    url = "https://api.perplexity.ai/chat/completions"
-                    
-                    headers = {
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    }
-                    
+                    import requests
+                    context = "\n\n".join(docs)
+                    SYSTEM_PROMPT = ("You are an assistant answering about fluoride in water. "
+                                     "Use ONLY the provided facts below.")
                     payload = {
-                        "model": model_name,
+                        "model": "sonar",  # update as needed
                         "messages": [
-                            {
-                                "role": "system",
-                                "content": """You are a helpful assistant answering questions about fluoride in drinking water.
-
-IMPORTANT RULES:
-1. Answer ONLY using the provided data
-2. If the answer is NOT in the data, say: "I don't have this information"
-3. Use simple, easy-to-understand language
-4. Avoid technical jargon
-5. Be accurate and factual
-
-DATA FROM KNOWLEDGE BASE:
-{}""".format(context)
-                            },
-                            {
-                                "role": "user",
-                                "content": prompt
-                            }
+                            {"role": "system", "content": SYSTEM_PROMPT + "\n" + context},
+                            {"role": "user", "content": prompt}
                         ],
-                        "max_tokens": 1024,
-                        "temperature": 0.2
+                        "max_tokens": 1000, "temperature": 0.2
                     }
-                    
-                    response = requests.post(url, headers=headers, json=payload, timeout=30)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        answer = data["choices"][0]["message"]["content"]
-                        st.markdown(answer)
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": answer,
-                            "sources": retrieved_docs
-                        })
-                        
-                        with st.expander("📚 Sources Used"):
-                            for i, source in enumerate(retrieved_docs, 1):
-                                st.markdown(f"**Source {i}:**")
-                                st.text(source[:300] + "..." if len(source) > 300 else source)
+                    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+                    r = requests.post("https://api.perplexity.ai/chat/completions", headers=headers, json=payload, timeout=45)
+                    if r.status_code == 200:
+                        out = r.json()["choices"][0]["message"]["content"]
+                        st.markdown(out)
+                        st.session_state["messages"].append({"role": "assistant", "content": out})
                     else:
-                        st.error(f"❌ API Error {response.status_code}: {response.text}")
-                        
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+                        err = f"API error: {r.status_code} {r.text[:100]}"
+                        st.error(err)
+                        st.session_state["messages"].append({"role": "assistant", "content": err})
+            except Exception as ex:
+                st.error("Unexpected error: " + str(ex))
+                st.session_state
+
 
 
 
